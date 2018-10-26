@@ -263,7 +263,7 @@ class MibBuilder(object):
         self.mibSymbols = {}
         self.__mibSources = []
         self.__modSeen = {}
-        self.__modPathsSeen = set()
+        self.__modPathsSeen = {}
         self.__mibCompiler = None
         self.setMibSources(*sources)
 
@@ -306,7 +306,7 @@ class MibBuilder(object):
                 debug.logger & debug.flagBld and debug.logger('loadModule: seen %s' % modPath)
                 break
             else:
-                self.__modPathsSeen.add(modPath)
+                self.__modPathsSeen[modPath] = True
 
             debug.logger & debug.flagBld and debug.logger('loadModule: evaluating %s' % modPath)
 

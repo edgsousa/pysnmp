@@ -29,6 +29,10 @@ Revision 5.0.0, released 2018-10-??
     instrumentation controller return immediately and deliver their
     results via a call back.
 
+  * The `read*`, `write*`, `create*` and `destroy*` methods of
+    the `SNMPv2-SMI` MIB objects redesigned to return immediately
+    and deliver their results via a call back.
+
   * CommandResponder application passes `snmpEngine` and optionally
     user-supplied `cbCtx` object throughout the MIB instrumentation
     methods. The goal is to let MIB objects access/modify whatever

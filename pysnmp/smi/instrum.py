@@ -8,6 +8,7 @@ import sys
 import traceback
 import functools
 from pysnmp import nextid
+from pysnmp.proto import rfc1905
 from pysnmp.smi import error
 from pysnmp import debug
 
@@ -205,51 +206,70 @@ class MibInstrumController(AbstractMibInstrumController):
 
     # MIB instrumentation
 
-    def _flipFlopFsmCb(self, varBind, **context):
-        fsmContext = context[self.FSM_CONTEXT]
+    def flipFlopFsm(self, fsmTable, *varBinds, **context):
 
-        varBinds = fsmContext['varBinds']
+        count = [0]
 
-        idx = context.pop('idx')
+        cbFun = context['cbFun']
 
-        if idx >= 0:
-            fsmContext['count'] += 1
+        def _cbFun(varBind, **context):
+            idx = context.pop('idx', None)
 
-            varBinds[idx] = varBind
+            _varBinds = context['varBinds']
 
-            debug.logger & debug.flagIns and debug.logger(
-                '_flipFlopFsmCb: var-bind %d, processed %d, expected %d' % (idx, fsmContext['count'], len(varBinds)))
+            name, value = varBind
 
-            if fsmContext['count'] < len(varBinds):
+            # Watch for possible exception tuple
+            if isinstance(value, tuple):
+
+                exc_type, exc_value, traceback = value
+
+                if isinstance(exc_value, error.NoSuchObjectError):
+                    value = rfc1905.noSuchObject
+
+                elif isinstance(exc_value, error.NoSuchInstanceError):
+                    value = rfc1905.noSuchOInstance
+
+                elif isinstance(exc_value, error.EndOfMibViewError):
+                    value = rfc1905.endOfMibView
+
+                elif isinstance(exc_value, Exception):
+                    raise value
+
+            _varBinds[idx] = name, value
+
+            if idx is None:
+                cbFun(_varBinds, **context)
                 return
 
-        debug.logger & debug.flagIns and debug.logger(
-            '_flipFlopFsmCb: finished, output %r' % (varBinds,))
+            count[0] += 1
 
-        fsmCallable = fsmContext['fsmCallable']
+            debug.logger & debug.flagIns and debug.logger(
+                '_cbFun: var-bind %d, processed %d, expected %d' % (
+                idx, count[0], len(varBinds)))
 
-        fsmCallable(**context)
+            if count[0] < len(varBinds):
+                return
 
-    def flipFlopFsm(self, fsmTable, *varBinds, **context):
-        try:
-            fsmContext = context[self.FSM_CONTEXT]
+            debug.logger & debug.flagIns and debug.logger(
+                '_cbFun: finished, output var-binds %r' % (_varBinds,))
 
-        except KeyError:
-            self.__indexMib()
+            self.flipFlopFsm(fsmTable, *varBinds, **dict(context, cbFun=cbFun))
 
-            fsmContext = context[self.FSM_CONTEXT] = dict(
-                sessionId=self.FSM_SESSION_ID(),
-                varBinds=list(varBinds[:]),
-                fsmCallable=functools.partial(self.flipFlopFsm, fsmTable, *varBinds),
-                state=self.STATE_START, status=self.STATUS_OK
-            )
-
-            debug.logger & debug.flagIns and debug.logger('flipFlopFsm: input var-binds %r' % (varBinds,))
+        debug.logger & debug.flagIns and debug.logger('flipFlopFsm: input var-binds %r' % (varBinds,))
 
         mibTree, = self.mibBuilder.importSymbols('SNMPv2-SMI', 'iso')
 
-        state = fsmContext['state']
-        status = fsmContext['status']
+        try:
+            state = context['state']
+            status = context['status']
+            _varBinds = context['varBinds']
+
+        except KeyError:
+            state, status = self.STATE_START, self.STATUS_OK
+            _varBinds = list(varBinds)
+
+            self.__indexMib()
 
         debug.logger & debug.flagIns and debug.logger(
             'flipFlopFsm: current state %s, status %s' % (state, status))
@@ -271,19 +291,18 @@ class MibInstrumController(AbstractMibInstrumController):
 
         if state == self.STATE_STOP:
             context.pop(self.FSM_CONTEXT, None)
-
-            cbFun = context.get('cbFun')
+            context.pop('state', None)
+            context.pop('status', None)
+            context.pop('varBinds', None)
+            context.pop('oName', None)
             if cbFun:
-                varBinds = fsmContext['varBinds']
-                cbFun(varBinds, **context)
-
+                cbFun(_varBinds, **context)
             return
 
-        fsmContext.update(state=state, count=0)
-
         # the case of no var-binds
-        if not varBinds:
-            return self._flipFlopFsmCb(None, idx=-1, **context)
+        if cbFun and not varBinds:
+            _cbFun(None, **context)
+            return
 
         mgmtFun = getattr(mibTree, state, None)
         if not mgmtFun:
@@ -292,22 +311,20 @@ class MibInstrumController(AbstractMibInstrumController):
             )
 
         for idx, varBind in enumerate(varBinds):
+
             try:
-                # TODO: managed objects to run asynchronously
-                #mgmtFun(varBind, idx=idx, **context)
-                self._flipFlopFsmCb(mgmtFun(varBind, idx=idx, **context), idx=idx, **context)
+                mgmtFun(varBind, idx=idx, **dict(context, cbFun=_cbFun, state=state, status=status, varBinds=_varBinds, oName=None))
 
             except error.SmiError:
                 exc = sys.exc_info()
+
                 debug.logger & debug.flagIns and debug.logger(
                     'flipFlopFsm: fun %s exception %s for %r with traceback: %s' % (
                         mgmtFun, exc[0], varBind, traceback.format_exception(*exc)))
 
                 varBind = varBind[0], exc
 
-                fsmContext['status'] = self.STATUS_ERROR
-
-                self._flipFlopFsmCb(varBind, idx=idx, **context)
+                _cbFun(varBind, idx=idx, **dict(context, status=self.STATUS_ERROR))
 
                 return
 
